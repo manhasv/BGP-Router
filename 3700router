@@ -7,6 +7,7 @@ class Router:
     relations = {}
     sockets = {}
     ports = {}
+    routing_table = {}  # Routing table to store information about neighbors
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -28,6 +29,108 @@ class Router:
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+    def send_update_message(self, neighbor):
+        # Build the message dynamically based on the current routing table and the specific format
+        msg_content = {}
+        for dest, info in self.routing_table.items():
+            max_ASPath = []
+            current_ASPath = info.get('ASPath', [])
+            if not max_ASPath or len(current_ASPath) > len(max_ASPath):
+                max_ASPath = current_ASPath
+            if 'network' in info and 'netmask' in info:  # Ensure necessary fields are present
+                msg_content = {
+                    "netmask": info['netmask'],
+                    "ASPath": [self.asn] + max_ASPath,
+                    "network": info['network'],
+                }
+
+        update_msg = {
+            "msg": msg_content,
+            "src": self.our_addr(neighbor),
+            "dst": neighbor,
+            "type": "update",
+        }
+        routing_table_json = json.dumps(update_msg)
+        self.send(neighbor, routing_table_json)
+
+    def send_data_message(self, neighbor):
+        # Build the message dynamically based on the current routing table and the specific format
+        msg_content = {}
+        network = ''
+        for dest, info in self.routing_table.items():
+            max_ASPath = []
+            current_ASPath = info.get('ASPath', [])
+            if not max_ASPath or len(current_ASPath) > len(max_ASPath):
+                max_ASPath = current_ASPath
+            if 'network' in info and 'netmask' in info:  # Ensure necessary fields are present
+                msg_content = {
+                    "netmask": info['netmask'],
+                    "ASPath": [self.asn] + max_ASPath,
+                    "network": info['network'],
+                }
+                network = info['network']
+        print(network)
+        print(neighbor)
+        update_msg = {
+            "msg": msg_content,
+            "src": self.our_addr(neighbor),
+            "dst": neighbor,
+            "type": "data",
+        }
+        routing_table_json = json.dumps(update_msg)
+        print("Sending data message")
+        print(routing_table_json)
+        self.send(neighbor, routing_table_json)
+
+    def send_table_message(self, srcif):
+        table_msg = {
+            "src": self.our_addr(srcif),
+            "dst": srcif,
+            "type": "table",
+            "msg": []
+        }
+
+        # Construct the routing table message
+        for dest, info in self.routing_table.items():
+            table_entry = {
+                "origin": info.get('origin', ''),
+                "localpref": info.get('localpref', 0),
+                "network": info.get('network', ''),
+                "ASPath": info.get('ASPath', []),
+                "netmask": info.get('netmask', ''),
+                "peer": info.get('peer', ''),  
+                "selfOrigin": info.get('selfOrigin', False),
+            }
+            table_msg["msg"].append(table_entry)
+
+        # Send the routing table message
+        self.send(srcif, json.dumps(table_msg))
+
+    
+
+
+    def handle_message(self, msg, srcif):
+        print("Received message '%s' from %s" % (msg, srcif))
+        msg_data = json.loads(msg)
+        if msg_data["type"] == "update":
+            # Assuming msg_data["msg"] contains the necessary routing information
+            route_info = msg_data["msg"]
+            # Set the srcif as the peer for this route
+            route_info["peer"] = srcif
+            # Update the routing table with the new route information
+            self.routing_table[srcif] = route_info
+
+        # After updating routing table, send update message to other neighbors if any
+        for neighbor in self.sockets:
+            if msg_data["type"] == "update" and neighbor != srcif:
+                self.send_update_message(neighbor)
+            elif msg_data["type"] == "data" and neighbor != srcif:
+                print("Data ")
+                
+                self.send_data_message(neighbor)
+            elif msg_data["type"] == "dump" and neighbor == srcif:
+                self.send_table_message(srcif)
+
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
@@ -41,6 +144,9 @@ class Router:
                 msg = k.decode('utf-8')
 
                 print("Received message '%s' from %s" % (msg, srcif))
+
+                
+                self.handle_message(msg, srcif)
         return
 
 if __name__ == "__main__":
