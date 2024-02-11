@@ -53,34 +53,29 @@ class Router:
         routing_table_json = json.dumps(update_msg)
         self.send(neighbor, routing_table_json)
 
-    def send_data_message(self, neighbor):
+    def compare_first_octet(self, ip1, ip2):
+        octet1 = int(ip1.split('.')[0])
+        octet2 = int(ip2.split('.')[0])
+        return octet1 == octet2
+
+    def find_next_hop(self, destination):
+        print(destination)
+        for entry in self.routing_table.values():
+            print(entry.get('network'))
+            if (self.compare_first_octet(entry.get('network'), destination)):
+                return entry.get('peer')
+        return None
+
+    def send_data_message(self, msg_data):
         # Build the message dynamically based on the current routing table and the specific format
-        msg_content = {}
-        network = ''
-        for dest, info in self.routing_table.items():
-            max_ASPath = []
-            current_ASPath = info.get('ASPath', [])
-            if not max_ASPath or len(current_ASPath) > len(max_ASPath):
-                max_ASPath = current_ASPath
-            if 'network' in info and 'netmask' in info:  # Ensure necessary fields are present
-                msg_content = {
-                    "netmask": info['netmask'],
-                    "ASPath": [self.asn] + max_ASPath,
-                    "network": info['network'],
-                }
-                network = info['network']
-        print(network)
-        print(neighbor)
-        update_msg = {
-            "msg": msg_content,
-            "src": self.our_addr(neighbor),
-            "dst": neighbor,
-            "type": "data",
-        }
-        routing_table_json = json.dumps(update_msg)
-        print("Sending data message")
+        
+        next_hop = self.find_next_hop(msg_data['dst'])
+
+        routing_table_json = json.dumps(msg_data)
+        print("Sending data message to ")
+        print(next_hop)
         print(routing_table_json)
-        self.send(neighbor, routing_table_json)
+        self.send(next_hop, routing_table_json)
 
     def send_table_message(self, srcif):
         table_msg = {
@@ -113,23 +108,21 @@ class Router:
         print("Received message '%s' from %s" % (msg, srcif))
         msg_data = json.loads(msg)
         if msg_data["type"] == "update":
-            # Assuming msg_data["msg"] contains the necessary routing information
             route_info = msg_data["msg"]
-            # Set the srcif as the peer for this route
             route_info["peer"] = srcif
             # Update the routing table with the new route information
             self.routing_table[srcif] = route_info
 
-        # After updating routing table, send update message to other neighbors if any
+        # After updating routing table, send message to other neighbors 
         for neighbor in self.sockets:
             if msg_data["type"] == "update" and neighbor != srcif:
                 self.send_update_message(neighbor)
-            elif msg_data["type"] == "data" and neighbor != srcif:
-                print("Data ")
-                
-                self.send_data_message(neighbor)
             elif msg_data["type"] == "dump" and neighbor == srcif:
                 self.send_table_message(srcif)
+        if msg_data["type"] == "data":
+            print("Data ")
+            print(msg_data)
+            self.send_data_message(msg_data)
 
     def run(self):
         while True:
