@@ -61,9 +61,7 @@ class Router:
             network = entry.get('network')
             netmask = entry.get('netmask')
             peer = entry.get('peer')
-            if self.matches(destination, network, netmask):
-                if self.compare_first_node(peer, destination):
-                    return entry.get('peer')
+            
 
             # Check if the destination matches the network with the longest prefix
             if self.matches(destination, network, netmask):
