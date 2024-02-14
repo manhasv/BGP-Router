@@ -7,7 +7,8 @@ class Router:
     relations = {}
     sockets = {}
     ports = {}
-    routing_table = {}  # Routing table to store information about neighbors
+    routing_table = []  # Routing table to store information about neighbors
+    revocation_history = []
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -28,54 +29,124 @@ class Router:
 
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
-
-    def send_update_message(self, neighbor):
-        # Build the message dynamically based on the current routing table and the specific format
-        msg_content = {}
-        for dest, info in self.routing_table.items():
-            max_ASPath = []
-            current_ASPath = info.get('ASPath', [])
-            if not max_ASPath or len(current_ASPath) > len(max_ASPath):
-                max_ASPath = current_ASPath
-            if 'network' in info and 'netmask' in info:  # Ensure necessary fields are present
-                msg_content = {
-                    "netmask": info['netmask'],
-                    "ASPath": [self.asn] + max_ASPath,
-                    "network": info['network'],
-                }
-
+    
+    def send_update_message(self, neighbor, msg_data):
         update_msg = {
-            "msg": msg_content,
+            "msg": {
+                "netmask": msg_data['msg']['netmask'],
+                "ASPath": [self.asn] + msg_data['msg']['ASPath'],
+                "network": msg_data['msg']['network'],
+            },
             "src": self.our_addr(neighbor),
             "dst": neighbor,
             "type": "update",
         }
+
+        # Build the message dynamically based on the current routing table and the specific format
         routing_table_json = json.dumps(update_msg)
+
         self.send(neighbor, routing_table_json)
 
-    def compare_first_octet(self, ip1, ip2):
-        octet1 = int(ip1.split('.')[0])
-        octet2 = int(ip2.split('.')[0])
-        return octet1 == octet2
+    def compare_first_node(self, ip1, ip2):
+        # Split the IP addresses by '.'
+        ip1_parts = ip1.split('.')
+        ip2_parts = ip2.split('.')
+
+        # Compare the first node
+        return ip1_parts[0] == ip2_parts[0]
 
     def find_next_hop(self, destination):
-        print(destination)
-        for entry in self.routing_table.values():
-            print(entry.get('network'))
-            if (self.compare_first_octet(entry.get('network'), destination)):
-                return entry.get('peer')
-        return None
+        longest_match = None
+        for entry in self.routing_table:
+            network = entry.get('network')
+            netmask = entry.get('netmask')
+            peer = entry.get('peer')
+            if self.matches(destination, network, netmask):
+                if self.compare_first_node(peer, destination):
+                    return entry.get('peer')
 
-    def send_data_message(self, msg_data):
+            # Check if the destination matches the network with the longest prefix
+            if self.matches(destination, network, netmask):
+                if longest_match is None or self.prefix_length(netmask) > self.prefix_length(longest_match['netmask']):
+                    longest_match = entry
+
+                # Handle tie-breaking based on criteria
+                elif self.prefix_length(netmask) == self.prefix_length(longest_match['netmask']):
+
+                    if entry.get('localpref', 0) > longest_match.get('localpref', 0):
+                        longest_match = entry
+                    elif entry.get('selfOrigin', False) and not longest_match.get('selfOrigin', False):
+                        longest_match = entry
+                    elif len(entry.get('ASPath', [])) < len(longest_match.get('ASPath', [])):
+                        longest_match = entry
+                    elif entry.get('origin') < longest_match.get('origin'):
+                        longest_match = entry
+                    elif peer < longest_match.get('peer'):
+                        longest_match = entry
+
+        if longest_match:
+            return longest_match.get('peer')
+        else:
+            return None
+
+    def matches(self, ip, network, netmask):
+        ip_parts = ip.split('.')
+        network_parts = network.split('.')
+        netmask_parts = netmask.split('.')
+        for i in range(4):
+            if (int(ip_parts[i]) & int(netmask_parts[i])) != (int(network_parts[i]) & int(netmask_parts[i])):
+                return False
+        return True
+
+    def prefix_length(self, netmask):
+        return sum(bin(int(x)).count('1') for x in netmask.split('.'))
+
+    def send_data_message(self, msg_data, srcif):
         # Build the message dynamically based on the current routing table and the specific format
-        
         next_hop = self.find_next_hop(msg_data['dst'])
-
         routing_table_json = json.dumps(msg_data)
-        print("Sending data message to ")
-        print(next_hop)
-        print(routing_table_json)
-        self.send(next_hop, routing_table_json)
+        if (next_hop == None):
+            no_route_msg = {
+                "msg": msg_data['msg'],
+                "src": msg_data['src'],
+                "dst": msg_data['dst'],
+                "type": "no route",
+            }
+            routing_table_json = json.dumps(no_route_msg)
+            print("No route")
+            print("Sending back to")
+            print(srcif)
+            self.send(srcif, routing_table_json)
+        else:
+            print("Sending data message to")
+            print(next_hop)
+            self.send(next_hop, routing_table_json)
+        
+    def handle_withdraw_message(self, msg_data, srcif):
+        # Save a copy of the revocation message
+        self.revocation_history.append(msg_data)
+
+        # Remove the dead entry from the forwarding table
+        for entry in msg_data['msg']:
+            print('Deleting')
+            print(srcif)
+            self.routing_table = [route for route in self.routing_table if route.get('peer') != srcif ]
+        # Send copies of the revocation to other neighboring routers
+        for neighbor in self.sockets:
+            if neighbor != msg_data['src']:
+                self.send_withdraw_message(neighbor, msg_data)
+
+    def send_withdraw_message(self, neighbor, msg_data):
+        # Build the withdrawal message
+        withdraw_msg = {
+            "msg": msg_data['msg'],
+            "src": self.our_addr(neighbor),
+            "dst": neighbor,
+            "type": "withdraw",
+        }
+        # Send the withdrawal message
+        self.send(neighbor, json.dumps(withdraw_msg))
+
 
     def send_table_message(self, srcif):
         table_msg = {
@@ -84,9 +155,8 @@ class Router:
             "type": "table",
             "msg": []
         }
-
         # Construct the routing table message
-        for dest, info in self.routing_table.items():
+        for info in self.routing_table:
             table_entry = {
                 "origin": info.get('origin', ''),
                 "localpref": info.get('localpref', 0),
@@ -97,32 +167,46 @@ class Router:
                 "selfOrigin": info.get('selfOrigin', False),
             }
             table_msg["msg"].append(table_entry)
-
+        print('Table message')
+        print(table_msg)
         # Send the routing table message
         self.send(srcif, json.dumps(table_msg))
 
-    
-
-
     def handle_message(self, msg, srcif):
-        print("Received message '%s' from %s" % (msg, srcif))
         msg_data = json.loads(msg)
+        neighbor_relation = self.relations.get(srcif)
         if msg_data["type"] == "update":
             route_info = msg_data["msg"]
             route_info["peer"] = srcif
             # Update the routing table with the new route information
-            self.routing_table[srcif] = route_info
-
-        # After updating routing table, send message to other neighbors 
-        for neighbor in self.sockets:
-            if msg_data["type"] == "update" and neighbor != srcif:
-                self.send_update_message(neighbor)
-            elif msg_data["type"] == "dump" and neighbor == srcif:
-                self.send_table_message(srcif)
+            self.routing_table.append(route_info)
+            # Check if the relationship is "cust" or "peer" and store it in the routing table
+            route_info["relation"] = neighbor_relation  
+            # Forward the update message depending on the relationship
+            if neighbor_relation == "cust":
+                # If the neighbor is a "cust", forward the update to all neighbors
+                for neighbor in self.sockets:
+                    if neighbor != srcif:
+                        self.send_update_message(neighbor, msg_data)
+            elif neighbor_relation == "peer" or neighbor_relation == "prov":
+                # If the neighbor is a "peer" or "prov", forward the update only to "cust" neighbors
+                for neighbor in self.sockets:
+                    if self.relations.get(neighbor) == "cust" and neighbor != srcif:
+                        self.send_update_message(neighbor, msg_data)
+                
         if msg_data["type"] == "data":
-            print("Data ")
-            print(msg_data)
-            self.send_data_message(msg_data)
+            if neighbor_relation in ["peer", "prov"] and self.relations.get(self.find_next_hop(msg_data["dst"])) in ["peer", "prov"]:
+                print("Dropping data message from %s to %s as it is from peer/provider and destination is also peer/provider" % (srcif, msg_data["dst"]))
+                return  # Drop the message
+            else:
+                # Otherwise, forward the data message
+                self.send_data_message(msg_data, srcif)
+
+        if msg_data["type"] == "dump":
+            self.send_table_message(srcif)
+
+        if msg_data["type"] == "withdraw":
+            self.handle_withdraw_message(msg_data, srcif)
 
     def run(self):
         while True:
@@ -135,10 +219,7 @@ class Router:
                         srcif = sock
                         break
                 msg = k.decode('utf-8')
-
                 print("Received message '%s' from %s" % (msg, srcif))
-
-                
                 self.handle_message(msg, srcif)
         return
 
