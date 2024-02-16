@@ -8,8 +8,10 @@ class Router:
     sockets = {}
     ports = {}
     routing_table = []  # Routing table to store information about neighbors
+    routing_table_history = []
     revocation_history = []
 
+    # Initialized the relations, neighbors, ports and sockets and also send handshake message to neighbors
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
@@ -22,14 +24,18 @@ class Router:
             self.relations[neighbor] = relation
             self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
 
+    #Given the destination, break it ip into ip form
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
+    # Send a message to given network
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
     
+    # Send update message to given neighbor
+    # Update on new entry of routing table
     def send_update_message(self, neighbor, msg_data):
         update_msg = {
             "msg": {
@@ -115,7 +121,7 @@ class Router:
                             string = 'peer'
                             longest_match = entry
 
-        print(string)
+            print(string)
         if longest_match:
             return longest_match.get('peer')
         else:
@@ -168,6 +174,8 @@ class Router:
             if neighbor != msg_data['src']:
                 self.send_withdraw_message(neighbor, msg_data)
 
+    # Send withdraw messages to all neighbors except for the sender
+    # Withdraw message signal that the given route is deleted from current routing table
     def send_withdraw_message(self, neighbor, msg_data):
         # Build the withdrawal message
         withdraw_msg = {
@@ -180,6 +188,8 @@ class Router:
         self.send(neighbor, json.dumps(withdraw_msg))
 
 
+    # Sending table message back to sender of dump message
+    # This function exposes the current routing table in this router
     def send_table_message(self, srcif):
         table_msg = {
             "src": self.our_addr(srcif),
@@ -204,6 +214,7 @@ class Router:
         # Send the routing table message
         self.send(srcif, json.dumps(table_msg))
 
+    # Handle message from neighbors and configure it accordingly with types and neighbor types
     def handle_message(self, msg, srcif):
         msg_data = json.loads(msg)
         neighbor_relation = self.relations.get(srcif)
@@ -211,7 +222,9 @@ class Router:
             route_info = msg_data["msg"]
             route_info["peer"] = srcif
             # Update the routing table with the new route information
+            self.routing_table_history.append(route_info)
             self.routing_table.append(route_info)
+            
             # Check if the relationship is "cust" or "peer" and store it in the routing table
             route_info["relation"] = neighbor_relation  
             # Forward the update message depending on the relationship
@@ -225,6 +238,7 @@ class Router:
                 for neighbor in self.sockets:
                     if self.relations.get(neighbor) == "cust" and neighbor != srcif:
                         self.send_update_message(neighbor, msg_data)
+            self.aggregate(route_info)
                 
         if msg_data["type"] == "data":
             if neighbor_relation in ["peer", "prov"] and self.relations.get(self.find_next_hop(msg_data["dst"])) in ["peer", "prov"]:
@@ -240,23 +254,45 @@ class Router:
         if msg_data["type"] == "withdraw":
             self.handle_withdraw_message(msg_data, srcif)
 
-    def aggregate(self):
+    # Aggregate the routing table if possible
+    #
+    def aggregate(self, route_info):
         print("Aggregate")
-        # Create a copy of the routing table to avoid modifying it while iterating
-        routing_table_copy = self.routing_table.copy()
-
+        
         # Iterate over the routing table entries
-        for i, route1 in enumerate(self.routing_table):
-            for j, route2 in enumerate(self.routing_table):
-                if i != j and self.can_aggregate(route1, route2):
-                    # Routes are candidates for aggregation
-
-                    # Remove the second route after aggregation
-                    del routing_table_copy[j]
-
+        for i, route in enumerate(self.routing_table):
+            if self.can_aggregate(route, route_info) is not None:
+                print("can aggregate")
+                self.routing_table.pop(i)
+                if self.can_aggregate(route, route_info) == 1:
+                    route_info['network'] = route['network']
+                    route_info['netmask'] = self.decrease_netmask(route['netmask'])
+                else:
+                    route_info['netmask'] = self.decrease_netmask(route_info['netmask'])
+                self.routing_table.append(route_info)
+                    
+        
         # Update the routing table with the aggregated entries
-        self.routing_table = routing_table_copy
+        
+    # Used mostly by aggregation
+    # This function decrease the netmask by 1
+    def decrease_netmask(self, netmask):
+        # Split the netmask into octets
+        octets = netmask.split('.')
 
+        # Convert the last octet to an integer and decrement it by 1
+        last_octet = int(octets[2])
+        if last_octet > 0:
+            last_octet -= 1
+
+        # Update the last octet in the list
+        octets[2] = str(last_octet)
+
+        # Join the octets back into a string and return
+        return '.'.join(octets)
+
+    # Support func for aggregate
+    # Given two ips, determine if the two are aggregatable (same peer, same network, etc)
     def can_aggregate(self, route1, route2):
         return (
             self.are_adjacent(route1["network"], route2["network"]) and
@@ -265,22 +301,24 @@ class Router:
             route1.get("peer") == route2.get("peer")
         )
 
+    # Given two ips, determine if the two are adjacent to each other or not
     def are_adjacent(self, ip1, ip2):
         ip1_parts = ip1.split('.')
         ip2_parts = ip2.split('.')
-
         # Convert IP parts to integers
         ip1_ints = [int(part) for part in ip1_parts]
         ip2_ints = [int(part) for part in ip2_parts]
-
         # Check if the last octet differs by exactly 1
-        if abs(ip1_ints[3] - ip2_ints[3]) == 1:
+        if abs(ip1_ints[2] - ip2_ints[2]) == 1 and ip1_ints[0] == ip2_ints[0] and ip1_ints[1] == ip2_ints[1]:
             print("%s and %s are adjacent" % (ip1, ip2))
-            return True
+            if (ip1_ints[2] > ip2_ints[2]):
+                return 2
+            else:
+                return 1
         else:
-            print("No adjacent")
-            return False
+            return None
 
+    # Read continuously from neighbors and fetch the components to the handle_message
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
