@@ -9,6 +9,7 @@ class Router:
     ports = {}
     routing_table = []  # Routing table to store information about neighbors
     revocation_history = []
+    update_history = []
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -31,6 +32,7 @@ class Router:
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
     
     def send_update_message(self, neighbor, msg_data):
+        self.update_history.append(msg_data)
         update_msg = {
             "msg": {
                 "netmask": msg_data['msg']['netmask'],
@@ -47,13 +49,22 @@ class Router:
 
         self.send(neighbor, routing_table_json)
 
-    def compare_first_node(self, ip1, ip2):
-        # Split the IP addresses by '.'
-        ip1_parts = ip1.split('.')
-        ip2_parts = ip2.split('.')
-
-        # Compare the first node
-        return ip1_parts[0] == ip2_parts[0]
+    def compare_ips(self, ip1, ip2):
+        # Split the IP addresses into nodes
+        ip1_nodes = ip1.split('.')
+        ip2_nodes = ip2.split('.')
+        
+        # Initialize the match count
+        match_count = 0
+        
+        # Compare each node of the IP addresses
+        for i in range(min(len(ip1_nodes), len(ip2_nodes))):
+            if ip1_nodes[i] == ip2_nodes[i]:
+                match_count += 1
+            else:
+                break  # If a node doesn't match, stop comparing further
+        
+        return match_count
 
     def find_next_hop(self, destination):
         longest_match = None
@@ -61,28 +72,45 @@ class Router:
             network = entry.get('network')
             netmask = entry.get('netmask')
             peer = entry.get('peer')
-            
-
+            string = '?'
             # Check if the destination matches the network with the longest prefix
             if self.matches(destination, network, netmask):
-                if longest_match is None or self.prefix_length(netmask) > self.prefix_length(longest_match['netmask']):
+                string = 'only route'
+                if longest_match is None and self.compare_ips(network, destination) > 0:
+                    string = 'match'
                     longest_match = entry
+                if longest_match is not None:
+                    if self.compare_ips(network, destination) > self.compare_ips(longest_match['network'], destination):
+                        string = 'match'
+                        longest_match = entry
+                    elif self.prefix_length(netmask) > self.prefix_length(longest_match['netmask']):
+                        longest_match = entry
+                        string = 'prefix'
+                    # Handle tie-breaking based on criteria
+                    elif self.prefix_length(netmask) == self.prefix_length(longest_match['netmask']):
 
-                # Handle tie-breaking based on criteria
-                elif self.prefix_length(netmask) == self.prefix_length(longest_match['netmask']):
+                        if entry.get('localpref', 0) > longest_match.get('localpref', 0):
+                            string = 'localpref'
+                            longest_match = entry
+                        elif entry.get('selfOrigin', False) or longest_match.get('selfOrigin', False):
+                            if not longest_match.get('selfOrigin', False):
+                                string = 'selfOrigin'
+                                longest_match = entry
+                            if not entry.get('selfOrigin', False):
+                                continue
+                        elif len(entry.get('ASPath', [])) < len(longest_match.get('ASPath', [])):
+                            string = 'ASPath'
+                            longest_match = entry
+                        elif entry.get('origin') < longest_match.get('origin'):
+                            string = 'origin'
+                            longest_match = entry
+                        elif peer < longest_match.get('peer'):
+                            string = 'peer'
+                            longest_match = entry
 
-                    if entry.get('localpref', 0) > longest_match.get('localpref', 0):
-                        longest_match = entry
-                    elif entry.get('selfOrigin', False) and not longest_match.get('selfOrigin', False):
-                        longest_match = entry
-                    elif len(entry.get('ASPath', [])) < len(longest_match.get('ASPath', [])):
-                        longest_match = entry
-                    elif entry.get('origin') < longest_match.get('origin'):
-                        longest_match = entry
-                    elif peer < longest_match.get('peer'):
-                        longest_match = entry
-
+        print(string)
         if longest_match:
+            
             return longest_match.get('peer')
         else:
             return None
@@ -177,9 +205,11 @@ class Router:
             route_info = msg_data["msg"]
             route_info["peer"] = srcif
             # Update the routing table with the new route information
+            #if self.aggregate():
             self.routing_table.append(route_info)
-            # Check if the relationship is "cust" or "peer" and store it in the routing table
-            route_info["relation"] = neighbor_relation  
+
+
+            
             # Forward the update message depending on the relationship
             if neighbor_relation == "cust":
                 # If the neighbor is a "cust", forward the update to all neighbors
@@ -197,7 +227,7 @@ class Router:
                 print("Dropping data message from %s to %s as it is from peer/provider and destination is also peer/provider" % (srcif, msg_data["dst"]))
                 return  # Drop the message
             else:
-                # Otherwise, forward the data message
+                print("Intended data recipient %s" % (msg_data["dst"]))
                 self.send_data_message(msg_data, srcif)
 
         if msg_data["type"] == "dump":
@@ -205,6 +235,53 @@ class Router:
 
         if msg_data["type"] == "withdraw":
             self.handle_withdraw_message(msg_data, srcif)
+
+    def aggregate(self):
+        print("Aggregate")
+        # Create a copy of the routing table to avoid modifying it while iterating
+        routing_table_copy = self.routing_table.copy()
+
+        # Iterate over the routing table entries
+        for i, route1 in enumerate(self.routing_table):
+            for j, route2 in enumerate(self.routing_table):
+                if i != j and self.can_aggregate(route1, route2):
+                    # Routes are candidates for aggregation
+
+                    # Remove the second route after aggregation
+                    del routing_table_copy[j]
+
+        # Update the routing table with the aggregated entries
+        self.routing_table = routing_table_copy
+
+    def can_aggregate(self, route1, route2):
+        return (
+            self.are_adjacent(route1["network"], route2["network"]) and
+            route1.get("localpref") == route2.get("localpref") and
+            route1.get("origin") == route2.get("origin") and
+            route1.get("peer") == route2.get("peer")
+        )
+
+    def are_adjacent(self, ip1, ip2):
+        ip1_parts = ip1.split('.')
+        ip2_parts = ip2.split('.')
+
+        # Convert IP parts to integers
+        ip1_ints = [int(part) for part in ip1_parts]
+        ip2_ints = [int(part) for part in ip2_parts]
+
+        # Check if the last octet differs by exactly 1
+        if abs(ip1_ints[3] - ip2_ints[3]) == 1:
+            print("%s and %s are adjacent" % (ip1, ip2))
+            return True
+        else:
+            print("No adjacent")
+            return False
+
+    #def aggregate_routes(self, network1, network2):
+        
+
+    
+
 
     def run(self):
         while True:
