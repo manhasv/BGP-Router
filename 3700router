@@ -223,7 +223,7 @@ class Router:
             route_info["peer"] = srcif
             # Update the routing table with the new route information
             self.routing_table_history.append(route_info)
-            self.routing_table.append(route_info)
+            self.aggregate(route_info)
             
             # Check if the relationship is "cust" or "peer" and store it in the routing table
             route_info["relation"] = neighbor_relation  
@@ -238,7 +238,6 @@ class Router:
                 for neighbor in self.sockets:
                     if self.relations.get(neighbor) == "cust" and neighbor != srcif:
                         self.send_update_message(neighbor, msg_data)
-            self.aggregate(route_info)
                 
         if msg_data["type"] == "data":
             if neighbor_relation in ["peer", "prov"] and self.relations.get(self.find_next_hop(msg_data["dst"])) in ["peer", "prov"]:
@@ -258,32 +257,45 @@ class Router:
     #
     def aggregate(self, route_info):
         print("Aggregate")
+        boo = True
         
         # Iterate over the routing table entries
         for i, route in enumerate(self.routing_table):
             if self.can_aggregate(route, route_info) is not None:
-                print("can aggregate")
-                self.routing_table.pop(i)
-                if self.can_aggregate(route, route_info) == 1:
-                    route_info['network'] = route['network']
-                    route_info['netmask'] = self.decrease_netmask(route['netmask'])
+                print('routee')
+                print(route['network'])
+                print(route_info['network'])
+                if self.can_aggregate(route, route_info) < 0:
+                    print('before')
+                    route['network'] = route_info['network']
+                    route['netmask'] = self.decrease_netmask(route_info['netmask'], 1)
                 else:
-                    route_info['netmask'] = self.decrease_netmask(route_info['netmask'])
-                self.routing_table.append(route_info)
-                    
-        
-        # Update the routing table with the aggregated entries
-        
+                    print("after")
+                    route['netmask'] = self.decrease_netmask(route['netmask'], 1)
+                
+                print(route['network'])
+                self.routing_table[i] = route
+                boo = False     
+        if boo:
+            self.routing_table.append(route_info)
+
+
+    def same_nodes(self, ip1, ip2):
+        ip1_parts = ip1.split('.')
+        ip2_parts = ip2.split('.')
+        return ip1[0] == ip2[0] and ip1[1] == ip2[1]
+
+
     # Used mostly by aggregation
     # This function decrease the netmask by 1
-    def decrease_netmask(self, netmask):
+    def decrease_netmask(self, netmask, num):
         # Split the netmask into octets
         octets = netmask.split('.')
 
         # Convert the last octet to an integer and decrement it by 1
         last_octet = int(octets[2])
-        if last_octet > 0:
-            last_octet -= 1
+        if last_octet > num:
+            last_octet -= num
 
         # Update the last octet in the list
         octets[2] = str(last_octet)
@@ -296,6 +308,7 @@ class Router:
     def can_aggregate(self, route1, route2):
         return (
             self.are_adjacent(route1["network"], route2["network"]) and
+            route1.get("netmask") == route2.get("netmask") and
             route1.get("localpref") == route2.get("localpref") and
             route1.get("origin") == route2.get("origin") and
             route1.get("peer") == route2.get("peer")
@@ -309,12 +322,9 @@ class Router:
         ip1_ints = [int(part) for part in ip1_parts]
         ip2_ints = [int(part) for part in ip2_parts]
         # Check if the last octet differs by exactly 1
-        if abs(ip1_ints[2] - ip2_ints[2]) == 1 and ip1_ints[0] == ip2_ints[0] and ip1_ints[1] == ip2_ints[1]:
+        if abs(ip1_ints[2] - ip2_ints[2]) <= 3 and ip1_ints[0] == ip2_ints[0] and ip1_ints[1] == ip2_ints[1]:
             print("%s and %s are adjacent" % (ip1, ip2))
-            if (ip1_ints[2] > ip2_ints[2]):
-                return 2
-            else:
-                return 1
+            return ip1_ints[2] - ip2_ints[2]
         else:
             return None
 
