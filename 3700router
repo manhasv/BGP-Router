@@ -223,8 +223,9 @@ class Router:
             route_info["peer"] = srcif
             # Update the routing table with the new route information
             self.routing_table_history.append(route_info)
+            #self.routing_table.append(route_info)
             self.aggregate(route_info)
-            
+            self.check()
             # Check if the relationship is "cust" or "peer" and store it in the routing table
             route_info["relation"] = neighbor_relation  
             # Forward the update message depending on the relationship
@@ -261,10 +262,7 @@ class Router:
         
         # Iterate over the routing table entries
         for i, route in enumerate(self.routing_table):
-            if self.can_aggregate(route, route_info) is not None:
-                print('routee')
-                print(route['network'])
-                print(route_info['network'])
+            if self.can_aggregate(route, route_info) and route['network'] != route_info['network']:
                 if self.can_aggregate(route, route_info) < 0:
                     print('before')
                     route['network'] = route_info['network']
@@ -279,6 +277,12 @@ class Router:
         if boo:
             self.routing_table.append(route_info)
 
+    def check(self):
+        for i, route in enumerate(self.routing_table):
+            for j, route2 in enumerate(self.routing_table):
+                if self.can_aggregate(route, route2):
+                    self.aggregate(route)
+                    break
 
     def same_nodes(self, ip1, ip2):
         ip1_parts = ip1.split('.')
@@ -308,10 +312,12 @@ class Router:
     def can_aggregate(self, route1, route2):
         return (
             self.are_adjacent(route1["network"], route2["network"]) and
-            route1.get("netmask") == route2.get("netmask") and
             route1.get("localpref") == route2.get("localpref") and
             route1.get("origin") == route2.get("origin") and
-            route1.get("peer") == route2.get("peer")
+            route1.get("peer") == route2.get("peer") and
+            route1.get("origin") == route2.get("origin") and
+            route1.get("ASPath") == route2.get("ASPath") and
+            route1.get("selfOrigin") == route2.get("selfOrigin")
         )
 
     # Given two ips, determine if the two are adjacent to each other or not
@@ -322,7 +328,7 @@ class Router:
         ip1_ints = [int(part) for part in ip1_parts]
         ip2_ints = [int(part) for part in ip2_parts]
         # Check if the last octet differs by exactly 1
-        if abs(ip1_ints[2] - ip2_ints[2]) <= 3 and ip1_ints[0] == ip2_ints[0] and ip1_ints[1] == ip2_ints[1]:
+        if abs(ip1_ints[2] - ip2_ints[2]) <= 3 and ip1_ints[0] == ip2_ints[0] and ip1_ints[1] == ip2_ints[1] :
             print("%s and %s are adjacent" % (ip1, ip2))
             return ip1_ints[2] - ip2_ints[2]
         else:
