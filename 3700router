@@ -1,3 +1,4 @@
+
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
@@ -53,6 +54,7 @@ class Router:
 
         self.send(neighbor, routing_table_json)
 
+    # Compare the first node of the given ips
     def compare_first_node(self, ip1, ip2):
         # Split the IP addresses by '.'
         ip1_parts = ip1.split('.')
@@ -61,6 +63,7 @@ class Router:
         # Compare the first node
         return ip1_parts[0] == ip2_parts[0]
 
+    #Compare the given ips and return if they are equal
     def compare_ips(self, ip1, ip2):
         # Split the IP addresses into nodes
         ip1_nodes = ip1.split('.')
@@ -78,6 +81,7 @@ class Router:
         
         return match_count
 
+    # Find the next hop for the data message based on the network of current routing table
     def find_next_hop(self, destination):
         longest_match = None
         for entry in self.routing_table:
@@ -127,6 +131,7 @@ class Router:
         else:
             return None
 
+    # Check if the ip match with the network and netmask
     def matches(self, ip, network, netmask):
         ip_parts = ip.split('.')
         network_parts = network.split('.')
@@ -136,9 +141,11 @@ class Router:
                 return False
         return True
 
+    # Count the prefix length of given netmask
     def prefix_length(self, netmask):
         return sum(bin(int(x)).count('1') for x in netmask.split('.'))
 
+    # Send a data message to given ip
     def send_data_message(self, msg_data, srcif):
         # Build the message dynamically based on the current routing table and the specific format
         next_hop = self.find_next_hop(msg_data['dst'])
@@ -159,7 +166,8 @@ class Router:
             print("Sending data message to")
             print(next_hop)
             self.send(next_hop, routing_table_json)
-        
+    
+    # Send a withdraw message to given ip
     def handle_withdraw_message(self, msg_data, srcif):
         # Save a copy of the revocation message
         self.revocation_history.append(msg_data)
@@ -277,17 +285,13 @@ class Router:
         if boo:
             self.routing_table.append(route_info)
 
+    # Check to loop among the current table and check for aggregation
     def check(self):
         for i, route in enumerate(self.routing_table):
             for j, route2 in enumerate(self.routing_table):
                 if self.can_aggregate(route, route2):
                     self.aggregate(route)
                     break
-
-    def same_nodes(self, ip1, ip2):
-        ip1_parts = ip1.split('.')
-        ip2_parts = ip2.split('.')
-        return ip1[0] == ip2[0] and ip1[1] == ip2[1]
 
 
     # Used mostly by aggregation
